@@ -19,6 +19,7 @@
 #include <condition_variable> // 条件变量，对锁进行封装
 #include <queue>
 #include <vector>
+#include <unistd.h> // 使用睡眠函数
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -65,9 +66,9 @@ class Pool { // 玩家池
             try {
                 transport->open();
 
-                int res = client.save_data("acs_8253", "1331b90f", a, b); // 密码已经过MD5加密
+                int res = client.save_data("acs_8253", "1331b90f", a, b); // 密码已经过MD5加密了，hhh
 
-                if(!res) puts("success");
+                if(!res) puts("success"); // :验证云端是否存储成功
                 else puts("failed");
 
                 transport->close();
@@ -82,14 +83,27 @@ class Pool { // 玩家池
 
             // 如果有多余两个人就进行匹配
             while(users.size() > 1) {
-                auto a = users[0], b = users[1];
-                users.erase(users.begin()); // 先删除第一个人a
-                users.erase(users.begin()); // 删除b
+                // 将分差在50内的玩家进行匹配，每次匹配相近的一对
+                sort(users.begin(), users.end(), [&](User& a, User b) { // 先按分值排序
+                    return a.score < b.score;
+                });
 
-                save_result(a.id, b.id);
+
+                bool flag = true; // 防止分差过大时，出现死循环
+                for(uint32_t i=1; i<users.size(); i++) {
+                    auto a=users[i-1], b=users[i];
+                    if(b.score - a.score <= 50) { // 可以匹配
+                        users.erase(users.begin() + i - 1, users.begin() + i + 1); // 删掉a,b两个玩家，区间是左闭右开的
+                        save_result(a.id, b.id);
+
+                        flag = false;
+                        break; // 每次匹配完一对后，break掉for循环
+                    }
+                }
+                // 若玩家列表里还没有匹配，直接终止while循环
+                if(flag) break;
             }
         }
-
 
     private:
         std::vector<User> users;
@@ -145,7 +159,13 @@ void consume_task() {
         if(message_queue.q.empty()) {
             // 线程为空时，应该阻塞住
             // 使用条件变量，卡住，直到有新玩家进来时才继续执行(唤醒)
-            message_queue.cv.wait(lck);
+            // message_queue.cv.wait(lck);
+
+            lck.unlock(); // 解锁
+            pool.match(); // 玩家池匹配
+            // 实现每隔几秒匹配一次
+            sleep(2);
+
 
         } else {
             auto task = message_queue.q.front(); // 取出队头
