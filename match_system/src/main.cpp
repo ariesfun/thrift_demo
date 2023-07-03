@@ -12,6 +12,12 @@
 #include <thrift/transport/TSocket.h>
 #include <thrift/transport/TTransportUtils.h>
 
+#include <thrift/concurrency/ThreadManager.h>
+#include <thrift/concurrency/ThreadFactory.h>
+#include <thrift/TToString.h>
+#include <thrift/server/TThreadPoolServer.h>
+#include <thrift/server/TThreadedServer.h>
+
 #include <iostream>
 #include <string>
 #include <thread> // 线程操作
@@ -85,8 +91,8 @@ class Pool { // 玩家池
             while(users.size() > 1) {
                 // 将分差在50内的玩家进行匹配，每次匹配相近的一对
                 sort(users.begin(), users.end(), [&](User& a, User b) { // 先按分值排序
-                    return a.score < b.score;
-                });
+                        return a.score < b.score;
+                        });
 
 
                 bool flag = true; // 防止分差过大时，出现死循环
@@ -151,6 +157,24 @@ class MatchHandler : virtual public MatchIf {
 
 };
 
+class MatchCloneFactory : virtual public MatchIfFactory {
+    public:
+        ~MatchCloneFactory() override = default;
+        MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
+        {
+            std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
+            /*std::cout << "Incoming connection\n";
+            std::cout << "\tSocketInfo: "  << sock->getSocketInfo() << "\n";
+            std::cout << "\tPeerHost: "    << sock->getPeerHost() << "\n";
+            std::cout << "\tPeerAddress: " << sock->getPeerAddress() << "\n";
+            std::cout << "\tPeerPort: "    << sock->getPeerPort() << "\n";*/
+            return new MatchHandler;
+        }
+        void releaseHandler(MatchIf* handler) override {
+            delete handler;
+        }
+};
+
 
 void consume_task() {
     while(true) {
@@ -187,14 +211,13 @@ void consume_task() {
 
 
 int main(int argc, char **argv) {
-    int port = 9090;
-    ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
-    ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
-    ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
-    ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
-    ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
-    TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+    TThreadedServer server(
+            std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
+            std::make_shared<TServerSocket>(9090), //port
+            std::make_shared<TBufferedTransportFactory>(),
+            std::make_shared<TBinaryProtocolFactory>());
+
 
     std::cout<<"Start Match Server" << std::endl;
 
