@@ -50,12 +50,14 @@ class Pool { // 玩家池
     public:
         void add(User user) {
             users.push_back(user);
+            wt.push_back(0); // 等待的时间为0
         }
 
         void remove(User user) {
             for(uint32_t i=0; i<users.size(); i++) { // uint32_t 无符号整数
                 if(users[i].id == user.id) {
                     users.erase(users.begin() + i); // 删除当前这一个玩家
+                    wt.erase(wt.begin() + i);
                     break;
                 }
             }
@@ -82,29 +84,49 @@ class Pool { // 玩家池
                 std::cout << "ERROR: " << tx.what() << std::endl;
             }
 
+        }
 
+
+        bool check_match(uint32_t i, uint32_t j) {
+            auto a=users[i], b=users[j];
+            // 让a能匹配b, b能匹配a
+            int dt=abs(a.score - b.score);
+            int a_max_dif=wt[i]*50; // a可以允许的差距,每次扩大50
+            int b_max_dif=wt[j]*50;
+
+            return dt <= a_max_dif && dt <= b_max_dif;
         }
 
         void match() { // 匹配函数
 
+            // 每次匹配等待秒数需要加1
+            for(uint32_t i=0; i<wt.size(); i++) {
+                wt[i]++;
+            }
+
             // 如果有多余两个人就进行匹配
             while(users.size() > 1) {
-                // 将分差在50内的玩家进行匹配，每次匹配相近的一对
-                sort(users.begin(), users.end(), [&](User& a, User b) { // 先按分值排序
-                        return a.score < b.score;
-                        });
 
-
+                // 两重循环匹配
                 bool flag = true; // 防止分差过大时，出现死循环
-                for(uint32_t i=1; i<users.size(); i++) {
-                    auto a=users[i-1], b=users[i];
-                    if(b.score - a.score <= 50) { // 可以匹配
-                        users.erase(users.begin() + i - 1, users.begin() + i + 1); // 删掉a,b两个玩家，区间是左闭右开的
-                        save_result(a.id, b.id);
+                for(uint32_t i=0; i<users.size(); i++) {
+                    for(uint32_t j=i+1; j<users.size(); j++) {
+                        auto a=users[i], b=users[j];
+                        if(check_match(i, j)) {
+                            users.erase(users.begin() + j);  // 删掉这两个玩家
+                            users.erase(users.begin() + i);
 
-                        flag = false;
-                        break; // 每次匹配完一对后，break掉for循环
+                            // 先删后边的保证下标不会变
+                            wt.erase(wt.begin() + j); // 删掉等待时间
+                            wt.erase(wt.begin() + i);
+
+                            save_result(a.id, b.id);
+                            flag = false;
+                            break; // 这一对匹配结束
+                        }
                     }
+
+                   if(!flag) break; // 已经发生过匹配
                 }
                 // 若玩家列表里还没有匹配，直接终止while循环
                 if(flag) break;
@@ -113,6 +135,7 @@ class Pool { // 玩家池
 
     private:
         std::vector<User> users;
+        std::vector<int> wt; // 等待时间，单位：s
 
 }pool;
 
@@ -186,9 +209,11 @@ void consume_task() {
             // message_queue.cv.wait(lck);
 
             lck.unlock(); // 解锁
+
+            // 这里可以保证每次是等待1s，再进行下一次匹配
             pool.match(); // 玩家池匹配
             // 实现每隔几秒匹配一次
-            sleep(2);
+            sleep(1);
 
 
         } else {
@@ -203,7 +228,6 @@ void consume_task() {
             if(task.type == "add") pool.add(task.user);
             else if (task.type == "remove") pool.remove(task.user);
 
-            pool.match(); // 进行匹配
         }
 
     }
