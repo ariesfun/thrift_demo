@@ -9,6 +9,12 @@
 
 
 #include <iostream>
+#include <string>
+#include <thread> // 线程操作
+#include <mutex> // 锁
+#include <condition_variable> // 条件变量，对锁进行封装
+#include <queue>
+#include <vector>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -17,15 +23,77 @@ using namespace ::apache::thrift::server;
 
 using namespace  ::match_services;
 
+
+struct Task { // 任务
+    User user;
+    std::string type;
+};
+
+struct MessageQueue { // 消息队列
+    std::queue<Task> q; // 队列里存的是Task
+    std::mutex m;
+    std::condition_variable cv;
+}message_queue;
+
+class Pool { // 玩家池
+    public:
+        void add(User user) {
+            users.push_back(user);
+        }
+
+        void remove(User user) {
+            for(uint32_t i=0; i<users.size(); i++) { // uint32_t 无符号整数
+                if(users[i].id == user.id) {
+                    users.erase(users.begin() + i); // 删除当前这一个玩家
+                    break;
+                }
+            }
+        }
+
+        void save_result(int a, int b) { // 匹配完成后，需要保存结果
+            printf("Match Result: %d %d\n", a, b);
+        }
+
+        void match() { // 匹配函数
+
+            // 如果有多余两个人就进行匹配
+            while(users.size() > 1) {
+                auto a = users[0], b = users[1];
+                users.erase(users.begin()); // 先删除第一个人a
+                users.erase(users.begin()); // 删除b
+
+                save_result(a.id, b.id);
+            }
+        }
+
+
+    private:
+        std::vector<User> users;
+
+}pool;
+
+
+
 class MatchHandler : virtual public MatchIf {
     public:
         MatchHandler() {
             // Your initialization goes here
         }
 
+        // 加锁，为了保证有关队列的操作，同一时间只有一个线程在操作它
+
         int32_t add_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("add_user\n");
+
+            // 加锁,封装的好处是不需要显示地将它解锁
+            std::unique_lock<std::mutex> lck(message_queue.m);
+
+            // 操作队列，将任务加到队列里
+            message_queue.q.push({user, "add"});
+
+            // 唤醒所有被条件变量卡住的线程 (all or one)
+            message_queue.cv.notify_all();
 
             return 0;
         }
@@ -34,10 +102,45 @@ class MatchHandler : virtual public MatchIf {
             // Your implementation goes here
             printf("remove_user\n");
 
+            std::unique_lock<std::mutex> lck(message_queue.m);
+
+            message_queue.q.push({user, "remove"});
+
+            message_queue.cv.notify_all();
+
             return 0;
         }
 
 };
+
+
+void consume_task() {
+    while(true) {
+        // 加锁
+        std::unique_lock<std::mutex> lck(message_queue.m);
+        if(message_queue.q.empty()) {
+            // 线程为空时，应该阻塞住
+            // 使用条件变量，卡住，直到有新玩家进来时才继续执行(唤醒)
+            message_queue.cv.wait(lck);
+
+        } else {
+            auto task = message_queue.q.front(); // 取出队头
+            message_queue.q.pop();
+
+            // 队列操作完后，需要解锁
+            // 对队列的操作是共享的，操作完队列就解锁
+            lck.unlock();
+
+            // do task
+            if(task.type == "add") pool.add(task.user);
+            else if (task.type == "remove") pool.remove(task.user);
+
+            pool.match(); // 进行匹配
+        }
+
+    }
+}
+
 
 int main(int argc, char **argv) {
     int port = 9090;
@@ -50,6 +153,8 @@ int main(int argc, char **argv) {
     TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
 
     std::cout<<"Start Match Server" << std::endl;
+
+    std::thread matching_thread(consume_task);
 
     server.serve();
     return 0;
